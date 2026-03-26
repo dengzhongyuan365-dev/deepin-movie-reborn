@@ -897,6 +897,10 @@ void MpvProxy::initPropertyCache(mpv_handle *pHandle)
     m_observeProperty(pHandle, 0, "dwidth", MPV_FORMAT_INT64);
     m_observeProperty(pHandle, 0, "dheight", MPV_FORMAT_INT64);
     m_observeProperty(pHandle, 0, "video-out-params/rotate", MPV_FORMAT_INT64);
+    m_observeProperty(pHandle, 0, "panscan", MPV_FORMAT_DOUBLE);
+    m_observeProperty(pHandle, 0, "hwdec", MPV_FORMAT_STRING);
+    m_observeProperty(pHandle, 0, "keep-open", MPV_FORMAT_FLAG);
+    m_observeProperty(pHandle, 0, "eof-reached", MPV_FORMAT_FLAG);
 
     qDebug() << "Property cache initialization completed";
 }
@@ -931,6 +935,14 @@ void MpvProxy::updatePropertyCache(const QString &name, const QVariant &value)
         m_cachedIdleActive = value.toBool();
     } else if (name == "paused-for-cache") {
         m_cachedPausedForCache = value.toBool();
+    } else if (name == "panscan") {
+        m_cachedPanscan = value.toDouble();
+    } else if (name == "hwdec") {
+        m_cachedHwdec = value.toString();
+    } else if (name == "keep-open") {
+        m_cachedKeepOpen = value.toBool();
+    } else if (name == "eof-reached") {
+        m_cachedEofReached = value.toBool();
     }
 }
 
@@ -966,9 +978,23 @@ void MpvProxy::pollingEndOfPlayback()
     if (_state != Backend::Stopped) {
         m_bPolling = true;
         blockSignals(true);
-        stop();
 
-        // Add timeout protection to avoid deadlock
+        // If eof-reached is already true, we don't need to wait for END_FILE event
+        // because the playback has already ended. Just set state to Stopped directly.
+        if (m_cachedEofReached) {
+            qInfo() << "eof-reached is true, directly setting state to Stopped";
+            blockSignals(false);
+            setState(Backend::Stopped);
+            m_bPolling = false;
+            return;
+        }
+
+        // Send async stop command - m_waitEvent will process the mpv event queue,
+        // so the async command will be executed during polling
+        QList<QVariant> args = { "stop" };
+        my_command_async(m_handle, args, 0);
+
+        // Poll for END_FILE event with timeout protection
         int nTimeout = 0;
 
         while (_state != Backend::Stopped && nTimeout < POLLING_END_TIMEOUT) {
@@ -1396,24 +1422,27 @@ bool MpvProxy::loadSubtitle(const QFileInfo &fileInfo)
 
 bool MpvProxy::isSubVisible()
 {
+    // Note: This still uses synchronous call, consider caching if needed
     return my_get_property(m_handle, "sub-visibility").toBool();
 }
 
 void MpvProxy::setSubDelay(double dSecs)
 {
-    my_set_property(m_handle, "sub-delay", dSecs);
+    my_set_property_async(m_handle, "sub-delay", dSecs, 0);
 #ifndef _LIBDMR_
-    MovieConfiguration::get().updateUrl(_file, ConfigKnownKey::SubDelay, subDelay());
+    MovieConfiguration::get().updateUrl(_file, ConfigKnownKey::SubDelay, dSecs);
 #endif
 }
 
 double MpvProxy::subDelay() const
 {
+    // Note: This still uses synchronous call, consider caching if needed
     return my_get_property(m_handle, "sub-delay").toDouble();
 }
 
 QString MpvProxy::subCodepage()
 {
+    // Note: This still uses synchronous call, consider caching if needed
     auto cp = my_get_property(m_handle, "sub-codepage").toString();
     if (cp.startsWith("+")) {
         cp.remove(0, 1);
@@ -1424,8 +1453,8 @@ QString MpvProxy::subCodepage()
 
 void MpvProxy::addSubSearchPath(const QString &sPath)
 {
-    my_set_property(m_handle, "sub-paths", sPath);
-    my_set_property(m_handle, "sub-file-paths", sPath);
+    my_set_property_async(m_handle, "sub-paths", sPath, 0);
+    my_set_property_async(m_handle, "sub-file-paths", sPath, 0);
 }
 
 void MpvProxy::setSubCodepage(const QString &sCodePage)
@@ -1434,23 +1463,23 @@ void MpvProxy::setSubCodepage(const QString &sCodePage)
     if (!sCodePage.startsWith("+") && sCodePage != "auto")
         strTmp.prepend('+');
 
-    my_set_property(m_handle, "sub-codepage", strTmp);
-    my_command(m_handle, {"sub-reload"});
+    my_set_property_async(m_handle, "sub-codepage", strTmp, 0);
+    my_command_async(m_handle, {"sub-reload"}, 0);
 #ifndef _LIBDMR_
     if (_file.isValid())
-        MovieConfiguration::get().updateUrl(_file, ConfigKnownKey::SubCodepage, subCodepage());
+        MovieConfiguration::get().updateUrl(_file, ConfigKnownKey::SubCodepage, strTmp);
 #endif
 }
 
 void MpvProxy::updateSubStyle(const QString &sFont, int nSize)
 {
-    my_set_property(m_handle, "sub-font", sFont);
-    my_set_property(m_handle, "sub-font-size", nSize);
-    my_set_property(m_handle, "sub-color", "#FFFFFF");
-    my_set_property(m_handle, "sub-border-size", 1);
-    my_set_property(m_handle, "sub-border-color", "0.0/0.0/0.0/0.50");
-    my_set_property(m_handle, "sub-shadow-offset", 1);
-    my_set_property(m_handle, "sub-shadow-color", "0.0/0.0/0.0/0.50");
+    my_set_property_async(m_handle, "sub-font", sFont, 0);
+    my_set_property_async(m_handle, "sub-font-size", nSize, 0);
+    my_set_property_async(m_handle, "sub-color", "#FFFFFF", 0);
+    my_set_property_async(m_handle, "sub-border-size", 1, 0);
+    my_set_property_async(m_handle, "sub-border-color", "0.0/0.0/0.0/0.50", 0);
+    my_set_property_async(m_handle, "sub-shadow-offset", 1, 0);
+    my_set_property_async(m_handle, "sub-shadow-color", "0.0/0.0/0.0/0.50", 0);
 }
 
 void MpvProxy::showEvent(QShowEvent *pEvent)
@@ -1528,7 +1557,7 @@ void MpvProxy::selectTrack(int nId)
 {
     if (nId >= m_movieInfo.audios.size()) return;
     QVariant aid  = m_movieInfo.audios[nId]["id"];
-    my_set_property(m_handle, "aid", aid);
+    my_set_property_async(m_handle, "aid", aid, 0);
 }
 
 void MpvProxy::changeSoundMode(SoundMode soundMode)
@@ -1547,7 +1576,7 @@ void MpvProxy::changeSoundMode(SoundMode soundMode)
         break;
     }
 
-    my_command(m_handle, listArgs);
+    my_command_async(m_handle, listArgs, 0);
 }
 
 void MpvProxy::volumeUp()
@@ -1560,7 +1589,7 @@ void MpvProxy::volumeUp()
 
 void MpvProxy::changeVolume(int nVol)
 {
-    my_set_property(m_handle, "volume", volumeCorrection(nVol));
+    my_set_property_async(m_handle, "volume", volumeCorrection(nVol), 0);
 }
 
 void MpvProxy::volumeDown()
@@ -1581,13 +1610,14 @@ int MpvProxy::volume() const
 
 int MpvProxy::videoRotation() const
 {
+    // Note: This still uses synchronous call, consider caching if needed
     int nRotate = my_get_property(m_handle, "video-rotate").toInt();
     return (nRotate + 360) % 360;
 }
 
 void MpvProxy::setVideoRotation(int nDegree)
 {
-    my_set_property(m_handle, "video-rotate", nDegree);
+    my_set_property_async(m_handle, "video-rotate", nDegree, 0);
 }
 
 void MpvProxy::setVideoAspect(double dValue)
@@ -1597,17 +1627,13 @@ void MpvProxy::setVideoAspect(double dValue)
 #else
     QString aspectProperty = "video-aspect";
 #endif
-    my_set_property(m_handle, aspectProperty, dValue);
+    my_set_property_async(m_handle, aspectProperty, dValue, 0);
 }
 
 double MpvProxy::videoAspect() const
 {
-#if MPV_CLIENT_API_VERSION >= MPV_MAKE_VERSION(2, 2)
-    QString aspectProperty = "video-aspect-override";
-#else
-    QString aspectProperty = "video-aspect";
-#endif  
-    return my_get_property(m_handle, aspectProperty).toDouble();
+    // Return cached value to avoid synchronous API calls during event handling
+    return m_cachedAspectRatio;
 }
 
 bool MpvProxy::muted() const
@@ -1620,12 +1646,12 @@ void MpvProxy::toggleMute()
 {
     QList<QVariant> listArgs = { "cycle", "mute" };
     qInfo() << listArgs;
-    my_command(m_handle, listArgs);
+    my_command_async(m_handle, listArgs, 0);
 }
 
 void MpvProxy::setMute(bool bMute)
 {
-    my_set_property(m_handle, "mute", bMute);
+    my_set_property_async(m_handle, "mute", bMute, 0);
 }
 
 void MpvProxy::slotStateChanged()
@@ -1944,7 +1970,7 @@ void MpvProxy::initMember()
 void MpvProxy::play()
 {
     qInfo() << "Starting playback";
-    
+
     if(m_bLoadMedia) {
         qInfo() << "Media already loading, scheduling retry in 5 seconds";
         QTimer::singleShot(5000, [=](){ //超时5s恢复状态，视频加载成功后也会重置状态，正常播放状态下不会进入此函数
@@ -1954,7 +1980,13 @@ void MpvProxy::play()
         qDebug() << "Exiting MpvProxy::play() - media already loading";
         return;
     }
-    
+
+    // Reset eof-reached cache before loading new file to fix loop playback stuck issue
+    // When looping, the cached eof-reached value from previous playback may still be true,
+    // which causes PlayerEngine::play() to incorrectly detect end-of-file state
+    m_cachedEofReached = false;
+    qInfo() << "Reset eof-reached cache to false before loading new file";
+
     bool bRawFormat = false;
     QList<QVariant> listArgs = { "loadfile" };
     QStringList listOpts = { };
@@ -2092,7 +2124,7 @@ void MpvProxy::pauseResume()
     }
 
     qInfo() << "Toggling pause state - current state:" << paused();
-    my_set_property(m_handle, "pause", !paused());
+    my_set_property_async(m_handle, "pause", !paused(), 0);
     qDebug() << "Exiting MpvProxy::pauseResume()";
 }
 
@@ -2232,6 +2264,11 @@ int MpvProxy::my_set_property(mpv_handle *pHandle, const QString &sName, const Q
 
 bool MpvProxy::my_command_async(mpv_handle *pHandle, const QVariant &args, uint64_t tag)
 {
+    if (!m_bInited) {
+        m_vecWaitCommand.append(args);
+        return true;
+    }
+
     node_builder node(args);
     int nErr = m_commandNodeAsync(pHandle, tag, node.node());
     return nErr == 0;
@@ -2239,6 +2276,12 @@ bool MpvProxy::my_command_async(mpv_handle *pHandle, const QVariant &args, uint6
 
 int MpvProxy::my_set_property_async(mpv_handle *pHandle, const QString &sName, const QVariant &value, uint64_t tag)
 {
+    if (!m_bInited) {
+        m_mapWaitSet.insert(sName, value);
+        return 0;
+    }
+
+    if (!m_setPropertyAsync) return 0;
     node_builder node(value);
     return m_setPropertyAsync(pHandle, tag, sName.toUtf8().data(), MPV_FORMAT_NODE, node.node());
 }
@@ -2652,6 +2695,18 @@ void MpvProxy::makeCurrent()
 QVariant MpvProxy::getProperty(const QString &sName)
 {
     qDebug() << "Entering MpvProxy::getProperty()";
+
+    // Return cached values for properties to avoid synchronous API calls
+    if (sName == "panscan") {
+        return QVariant(m_cachedPanscan);
+    } else if (sName == "hwdec") {
+        return QVariant(m_cachedHwdec);
+    } else if (sName == "keep-open") {
+        return QVariant(m_cachedKeepOpen);
+    } else if (sName == "eof-reached") {
+        return QVariant(m_cachedEofReached);
+    }
+
     return my_get_property(m_handle, sName.toUtf8().data());
 }
 
@@ -2663,7 +2718,7 @@ void MpvProxy::setProperty(const QString &sName, const QVariant &val)
         m_bPauseOnStart = val.toBool();
     } else if (sName == "video-zoom") {
         qDebug() << "Setting video-zoom to" << val.toDouble();
-        my_set_property(m_handle, sName, val.toDouble());
+        my_set_property_async(m_handle, sName, val.toDouble(), 0);
     }  else if (sName == "color") {
         qDebug() << "Setting color to" << val.toString();
         QObject::setProperty("color", val);
@@ -2672,7 +2727,7 @@ void MpvProxy::setProperty(const QString &sName, const QVariant &val)
         QObject::setProperty("dmrhwdec-switch", val);
     } else {
         qDebug() << "Setting" << sName << "to" << val.toString();
-        my_set_property(m_handle, sName.toUtf8().data(), val);
+        my_set_property_async(m_handle, sName.toUtf8().data(), val, 0);
         if (sName == "vo") {
             qDebug() << "Setting vo to" << val.toString();
             m_sInitVo = val.toString();

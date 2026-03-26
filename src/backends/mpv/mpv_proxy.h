@@ -494,6 +494,10 @@ private:
     mutable bool m_cachedPause {false};
     mutable bool m_cachedIdleActive {true};
     mutable bool m_cachedPausedForCache {false};
+    mutable double m_cachedPanscan {0.0};
+    mutable QString m_cachedHwdec {"auto"};
+    mutable bool m_cachedKeepOpen {true};
+    mutable bool m_cachedEofReached {false};
 };
 
 }
