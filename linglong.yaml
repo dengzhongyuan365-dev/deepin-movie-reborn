@@ -19,8 +19,11 @@ command:
   - deepin-movie
 
 build: |
-  # 下载和安装依赖
+  # 下载和安装依赖（含 libmpv-dev，目的是把其传递依赖也一并下载下来）
   apt -y install --download-only libmpv-dev libxcb1-dev libxcb-util0-dev libffmpegthumbnailer-dev libxcb-shape0-dev libxcb-ewmh-dev xcb-proto x11proto-record-dev x11-utils libxtst-dev libavcodec-dev libavformat-dev libavutil-dev libpulse-dev libdvdnav-dev libgsettings-qt-dev libva-dev libgstreamer-plugins-base1.0-dev libgstreamer1.0-dev qt6-base-dev qt6-base-dev-tools qt6-base-private-dev qt6-l10n-tools qt6-svg-dev qt6-tools-dev-tools qt6-tools-dev qt6-multimedia-dev libqt6sql6-sqlite libmpris-qt6-dev libqt6opengl6-dev libdtk6gui-dev libdtk6widget-dev libdtk6core-dev libgpuinfo deepin-event-log
+  # 用本地修复版替换 apt 下载的 libmpv 包（修复 ao_pulse.c LoongArch ao_drain 卡死问题）
+  rm -f /var/cache/apt/archives/libmpv*.deb
+  cp ./deps/libmpv*.deb /var/cache/apt/archives/
   # libxcb1-dev：解决构建失败
   bash ./install_dep /var/cache/apt/archives "$PREFIX" "libxcb1-dev"
 
