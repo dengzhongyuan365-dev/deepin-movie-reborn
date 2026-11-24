@@ -11,6 +11,7 @@
 #include <player_backend.h>
 #include <player_engine.h>
 #include <QThread>
+#include <QTimer>
 #include <xcb/xproto.h>
 #undef Bool
 #include "../../vendor/qthelper.hpp"
@@ -419,6 +420,11 @@ private:
     void processPropertyChange(mpv_event_property *pEvent);
     void processPropertyChange(const QString &name);
     void processLogMessage(mpv_event_log_message *pEvent);
+    // 双屏切换/几何诊断：屏幕或窗口尺寸变化时自动采样打印几何信息
+    void installGeometryDiag();
+    void installGeometryDiagWindowHook();
+    void startGeometryDiag(const QString &reason);
+    void logGeometrySnapshot(const QString &reason);
     QImage takeOneScreenshot();
     void updatePlayingMovieInfo();
     void setState(PlayState state);
@@ -460,6 +466,9 @@ private:
     MpvHandle m_handle;                    //mpv句柄
     MpvGLWidget *m_pMpvGLwidget;           //opengl窗口
     QWidget *m_pParentWidget;
+    QTimer *m_pGeomDiagTimer {nullptr};    //几何诊断采样定时器
+    int m_nGeomDiagSamples {0};            //剩余采样次数
+    bool m_bGeomDiagWinHooked {false};     //是否已连接QWindow::screenChanged
     PlayingMovieInfo m_movieInfo;          //播放过的影片的信息
 
     QString m_sInitVo;                     //初始vo方式

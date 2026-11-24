@@ -24,6 +24,9 @@
 #include <random>
 #include <QtWidgets>
 #include <QtGlobal>
+#include <QScreen>
+#include <QGuiApplication>
+#include <QTimer>
 
 #include <xcb/xproto.h>
 #include <xcb/xcb_aux.h>
@@ -125,6 +128,7 @@ MpvProxy::MpvProxy(QWidget *parent)
     initMember();
 
     m_pParentWidget = parent;
+    installGeometryDiag();
 
     if (!CompositingManager::get().composited()) {
         qCDebug(dmrMpv) << "Compositing manager not composited. Setting window flags for native window.";
@@ -514,6 +518,8 @@ mpv_handle *MpvProxy::mpv_init()
             if (utils::check_wayland_env()) {
                 qCDebug(dmrMpv) << "DEBUG: Wayland environment detected. Setting wid for CSMCORE.";
                 my_set_property(pHandle, "wid", m_pParentWidget->winId());
+                qCWarning(dmrMpv) << "[GEODIAG] csmcore bind wid=0x" << QString::number(m_pParentWidget->winId(), 16);
+                startGeometryDiag(QStringLiteral("csmcore-bind-wid"));
             }
             m_sInitVo = "xv,x11";
         }  else if (X100GPU.exists() && X100VPU.exists()) {
@@ -757,6 +763,8 @@ mpv_handle *MpvProxy::mpv_init()
     } else {
         my_set_property(pHandle, "wid", m_pParentWidget->winId());
         qCDebug(dmrMpv) << "DEBUG: Not composited. Setting wid to parent widget's winId.";
+        qCWarning(dmrMpv) << "[GEODIAG] bind wid=0x" << QString::number(m_pParentWidget->winId(), 16);
+        startGeometryDiag(QStringLiteral("bind-wid"));
     }
 
 
@@ -1504,16 +1512,157 @@ void MpvProxy::updateSubStyle(const QString &sFont, int nSize)
     my_set_property(m_handle, "sub-shadow-color", "0.0/0.0/0.0/0.50");
 }
 
+void MpvProxy::installGeometryDiag()
+{
+    auto hookScreen = [this](QScreen *pScreen) {
+        if (!pScreen)
+            return;
+        connect(pScreen, &QScreen::geometryChanged, this,
+                [this](const QRect &) { startGeometryDiag(QStringLiteral("QScreen::geometryChanged")); },
+                Qt::UniqueConnection);
+        connect(pScreen, &QScreen::virtualGeometryChanged, this,
+                [this](const QRect &) { startGeometryDiag(QStringLiteral("QScreen::virtualGeometryChanged")); },
+                Qt::UniqueConnection);
+        connect(pScreen, &QScreen::physicalDotsPerInchChanged, this,
+                [this](qreal) { startGeometryDiag(QStringLiteral("QScreen::physicalDotsPerInchChanged")); },
+                Qt::UniqueConnection);
+        connect(pScreen, &QScreen::logicalDotsPerInchChanged, this,
+                [this](qreal) { startGeometryDiag(QStringLiteral("QScreen::logicalDotsPerInchChanged")); },
+                Qt::UniqueConnection);
+    };
+
+    const auto screens = QGuiApplication::screens();
+    for (QScreen *pScreen : screens)
+        hookScreen(pScreen);
+
+    connect(qGuiApp, &QGuiApplication::screenAdded, this,
+            [this, hookScreen](QScreen *pScreen) {
+                hookScreen(pScreen);
+                startGeometryDiag(QStringLiteral("QGuiApplication::screenAdded"));
+            });
+    connect(qGuiApp, &QGuiApplication::screenRemoved, this,
+            [this](QScreen *) { startGeometryDiag(QStringLiteral("QGuiApplication::screenRemoved")); });
+    connect(qGuiApp, &QGuiApplication::primaryScreenChanged, this,
+            [this](QScreen *) { startGeometryDiag(QStringLiteral("QGuiApplication::primaryScreenChanged")); });
+
+    installGeometryDiagWindowHook();
+    qCWarning(dmrMpv) << "[GEODIAG] screen signals installed, screen count:" << screens.size();
+}
+
+void MpvProxy::installGeometryDiagWindowHook()
+{
+    if (m_bGeomDiagWinHooked)
+        return;
+    QWindow *pWin = windowHandle();
+    if (!pWin)
+        return;
+    m_bGeomDiagWinHooked = true;
+    connect(pWin, &QWindow::screenChanged, this,
+            [this](QScreen *) { startGeometryDiag(QStringLiteral("QWindow::screenChanged")); });
+}
+
+void MpvProxy::startGeometryDiag(const QString &reason)
+{
+    if (!m_pGeomDiagTimer) {
+        m_pGeomDiagTimer = new QTimer(this);
+        m_pGeomDiagTimer->setInterval(200);
+        connect(m_pGeomDiagTimer, &QTimer::timeout, this, [this]() {
+            if (--m_nGeomDiagSamples <= 0) {
+                m_pGeomDiagTimer->stop();
+                logGeometrySnapshot(QStringLiteral("sampler-stop"));
+                return;
+            }
+            logGeometrySnapshot(QStringLiteral("sampler"));
+        });
+    }
+    m_nGeomDiagSamples = 50; // 200ms * 50 = 约10秒，覆盖“短暂未铺满→恢复”全过程
+    logGeometrySnapshot(QStringLiteral("trigger:%1").arg(reason));
+    m_pGeomDiagTimer->start();
+    installGeometryDiagWindowHook();
+}
+
+void MpvProxy::logGeometrySnapshot(const QString &reason)
+{
+    QWidget *pTop = topLevelWidget();
+    QWindow *pWin = pTop ? pTop->windowHandle() : nullptr;
+    QScreen *pScreen = pWin ? pWin->screen() : nullptr;
+
+    QString strScreen = QStringLiteral("none");
+    if (pScreen) {
+        const QRect geo = pScreen->geometry();
+        const QRect vgeo = pScreen->virtualGeometry();
+        strScreen = QStringLiteral("%1 geo=%2x%3+%4+%5 dpr=%6 vgeo=%7x%8")
+                            .arg(pScreen->name())
+                            .arg(geo.width()).arg(geo.height()).arg(geo.x()).arg(geo.y())
+                            .arg(pScreen->devicePixelRatio())
+                            .arg(vgeo.width()).arg(vgeo.height());
+    }
+
+    QString strOsd = QStringLiteral("n/a");
+    QString strDWidth = QStringLiteral("n/a");
+    QString strDHeight = QStringLiteral("n/a");
+    QString strVo = QStringLiteral("n/a");
+    QString strWid = QStringLiteral("n/a");
+    if (m_handle) {
+        const QVariant osd = my_get_property(m_handle, "osd-dimensions");
+        if (osd.canConvert<QVariantMap>()) {
+            const QVariantMap map = osd.toMap();
+            strOsd = QStringLiteral("%1x%2+%3+%4")
+                         .arg(map.value("w").toInt())
+                         .arg(map.value("h").toInt())
+                         .arg(map.value("x").toInt())
+                         .arg(map.value("y").toInt());
+        } else {
+            strOsd = osd.toString();
+        }
+        strDWidth = my_get_property(m_handle, "dwidth").toString();
+        strDHeight = my_get_property(m_handle, "dheight").toString();
+        strVo = my_get_property(m_handle, "current-vo").toString();
+        strWid = my_get_property(m_handle, "wid").toString();
+    }
+
+    qCWarning(dmrMpv).noquote()
+            << QStringLiteral("[GEODIAG] %1 | widget=%2x%3 dpr=%4 | top=%5x%6 pos=%7,%8 full=%9 max=%10 | screen=(%11) | vo=%12 wid=%13 | osd=%14 dwidth=%15 dheight=%16")
+                   .arg(reason)
+                   .arg(width()).arg(height())
+                   .arg(devicePixelRatioF())
+                   .arg(pTop ? pTop->width() : -1)
+                   .arg(pTop ? pTop->height() : -1)
+                   .arg(pTop ? pTop->x() : -1)
+                   .arg(pTop ? pTop->y() : -1)
+                   .arg(pTop && pTop->isFullScreen() ? 1 : 0)
+                   .arg(pTop && pTop->isMaximized() ? 1 : 0)
+                   .arg(strScreen)
+                   .arg(strVo)
+                   .arg(strWid)
+                   .arg(strOsd)
+                   .arg(strDWidth)
+                   .arg(strDHeight);
+}
+
 void MpvProxy::showEvent(QShowEvent *pEvent)
 {
     if (!m_bConnectStateChange) {
         m_bConnectStateChange = true;
     }
+    installGeometryDiagWindowHook();
+    startGeometryDiag(QStringLiteral("MpvProxy::showEvent"));
     Backend::showEvent(pEvent);
 }
 
 void MpvProxy::resizeEvent(QResizeEvent *pEvent)
 {
+    const QString strReason = QStringLiteral("MpvProxy::resizeEvent %1x%2->%3x%4")
+                                      .arg(pEvent->oldSize().width())
+                                      .arg(pEvent->oldSize().height())
+                                      .arg(pEvent->size().width())
+                                      .arg(pEvent->size().height());
+    if (m_pGeomDiagTimer && m_pGeomDiagTimer->isActive()) {
+        // 采样进行中，避免拖动窗口反复重启计时器，只补一条快照
+        logGeometrySnapshot(strReason);
+    } else {
+        startGeometryDiag(strReason);
+    }
     if (state() == PlayState::Stopped) {
         return;
     }
